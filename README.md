@@ -19,13 +19,13 @@ OpenClaw plugin that gives agents tools to read mail through IMAP and send mail 
 | `imap_move_messages` | Moves messages to another mailbox. |
 | `imap_delete_messages` | Deletes messages. |
 
-Mailboxes are identified by `mailboxId` (`<accountId>:<path>`) and messages by `messageId` (`<accountId>:<UIDVALIDITY>:<UID>:<path>`). A message moved to another mailbox gets a new `messageId`. Dates are ISO 8601. Reading a message does not mark it as read.
+Mailboxes are identified by `mailboxId` (`<accountMailAddress>:<path>`) and messages by `messageId` (`<accountMailAddress>:<UIDVALIDITY>:<UID>:<path>`). A message moved to another mailbox gets a new `messageId`. Dates are ISO 8601. Reading a message does not mark it as read.
 
 The plugin finds the drafts, sent, and trash mailboxes by their special use, which the server or the mailbox name gives.
 
 ## Configuration
 
-Set the accounts in `plugins.entries.imap-smtp.config.accounts` of `openclaw.json`, keyed by the email address of each mailbox. The email address is the `accountId`. [`openclaw.json.sample`](openclaw.json.sample) lists the items.
+Set the accounts in `plugins.entries.imap-smtp.config.accounts` of `openclaw.json`, keyed by the email address of each mailbox. The email address is the `accountMailAddress`. [`openclaw.json.sample`](openclaw.json.sample) lists the items.
 
 | Item | Value |
 | --- | --- |

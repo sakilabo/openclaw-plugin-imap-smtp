@@ -34,7 +34,7 @@ type Address = {
 };
 
 type MessageRef = {
-  accountId: string;
+  accountMailAddress: string;
   path: string;
   uidValidity: string;
   uid: number;
@@ -50,8 +50,8 @@ type AttachmentInfo = {
 };
 
 const MAX_MESSAGES_PER_MAILBOX = 100;
-// accountId is the email address of the mailbox. It has no colon, which separates the parts of the IDs.
-const ACCOUNT_ID_PATTERN = /^[^:@\s]+@[^:@\s]+$/u;
+// accountMailAddress is the email address of the mailbox. It has no colon, which separates the parts of the IDs.
+const ACCOUNT_MAIL_ADDRESS_PATTERN = /^[^:@\s]+@[^:@\s]+$/u;
 const DEFAULT_PREREAD_PLAIN_BYTES = 1024;
 const DEFAULT_PREREAD_HTML_BYTES = 2048;
 
@@ -76,15 +76,15 @@ function readAccounts(api: OpenClawPluginApi): Map<string, AccountConfig> {
     throw new Error("imap-smtp is not configured. Set accounts in plugins.entries.imap-smtp.config.");
   }
   const accounts = new Map(Object.entries(raw as Record<string, AccountConfig>));
-  for (const accountId of accounts.keys()) {
-    if (!ACCOUNT_ID_PATTERN.test(accountId)) throw new Error(`Account ${accountId} must be keyed by the email address of its mailbox.`);
+  for (const accountMailAddress of accounts.keys()) {
+    if (!ACCOUNT_MAIL_ADDRESS_PATTERN.test(accountMailAddress)) throw new Error(`Account ${accountMailAddress} must be keyed by the email address of its mailbox.`);
   }
   return accounts;
 }
 
-function account(accounts: Map<string, AccountConfig>, accountId: string): AccountConfig {
-  const config = accounts.get(accountId);
-  if (config === undefined) throw new Error(`Account ${accountId} is not configured.`);
+function account(accounts: Map<string, AccountConfig>, accountMailAddress: string): AccountConfig {
+  const config = accounts.get(accountMailAddress);
+  if (config === undefined) throw new Error(`Account ${accountMailAddress} is not configured.`);
   return config;
 }
 
@@ -133,25 +133,25 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-// IDs: mailboxId is "<accountId>:<path>"; messageId is "<accountId>:<uidValidity>:<uid>:<path>".
-function mailboxId(accountId: string, path: string): string {
-  return `${accountId}:${path}`;
+// IDs: mailboxId is "<accountMailAddress>:<path>"; messageId is "<accountMailAddress>:<uidValidity>:<uid>:<path>".
+function mailboxId(accountMailAddress: string, path: string): string {
+  return `${accountMailAddress}:${path}`;
 }
 
-function parseMailboxId(value: string): { accountId: string; path: string } {
+function parseMailboxId(value: string): { accountMailAddress: string; path: string } {
   const index = value.indexOf(":");
   if (index <= 0) throw new Error(`Invalid mailboxId: ${value}`);
-  return { accountId: value.slice(0, index), path: value.slice(index + 1) };
+  return { accountMailAddress: value.slice(0, index), path: value.slice(index + 1) };
 }
 
-function messageId(accountId: string, uidValidity: bigint | string, uid: number, path: string): string {
-  return `${accountId}:${uidValidity}:${uid}:${path}`;
+function messageId(accountMailAddress: string, uidValidity: bigint | string, uid: number, path: string): string {
+  return `${accountMailAddress}:${uidValidity}:${uid}:${path}`;
 }
 
 function parseMessageId(value: string): MessageRef {
   const match = /^([^:]+):(\d+):(\d+):(.+)$/u.exec(value);
   if (match === null) throw new Error(`Invalid messageId: ${value}`);
-  return { accountId: match[1]!, uidValidity: match[2]!, uid: Number(match[3]), path: match[4]! };
+  return { accountMailAddress: match[1]!, uidValidity: match[2]!, uid: Number(match[3]), path: match[4]! };
 }
 
 function isoDate(value: Date | string | undefined): string | undefined {
@@ -322,7 +322,7 @@ function referencesOf(headers: Buffer | undefined): string[] | undefined {
 
 const SUMMARY_QUERY = { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true, headers: ["references"] };
 
-async function summaries(client: ImapFlow, accountId: string, path: string, uidValidity: bigint, uids: number[], preread: PrereadBytes | undefined): Promise<Record<string, unknown>[]> {
+async function summaries(client: ImapFlow, accountMailAddress: string, path: string, uidValidity: bigint, uids: number[], preread: PrereadBytes | undefined): Promise<Record<string, unknown>[]> {
   if (uids.length === 0) return [];
   const messages = await client.fetchAll(uids.join(","), SUMMARY_QUERY, { uid: true });
   const previews = new Map<number, string>();
@@ -348,7 +348,7 @@ async function summaries(client: ImapFlow, accountId: string, path: string, uidV
   const byUid = new Map(messages.map((message) => [message.uid, message]));
   return uids.flatMap((uid) => {
     const message = byUid.get(uid);
-    return message === undefined ? [] : [summary(accountId, path, uidValidity, message, previews.get(message.uid))];
+    return message === undefined ? [] : [summary(accountMailAddress, path, uidValidity, message, previews.get(message.uid))];
   });
 }
 
@@ -396,11 +396,11 @@ async function uidsByDate(client: ImapFlow, criteria: { unseen?: boolean; sentBe
   return messages.sort((a, b) => time(b) - time(a) || b.uid - a.uid).map((message) => message.uid);
 }
 
-function summary(accountId: string, path: string, uidValidity: bigint, message: FetchMessageObject, preview: string | undefined): Record<string, unknown> {
+function summary(accountMailAddress: string, path: string, uidValidity: bigint, message: FetchMessageObject, preview: string | undefined): Record<string, unknown> {
   const envelope = message.envelope;
   return {
-    messageId: messageId(accountId, uidValidity, message.uid, path),
-    mailboxId: mailboxId(accountId, path),
+    messageId: messageId(accountMailAddress, uidValidity, message.uid, path),
+    mailboxId: mailboxId(accountMailAddress, path),
     subject: envelope?.subject,
     date: isoDate(envelope?.date),
     receivedDate: isoDate(message.internalDate),
@@ -440,12 +440,12 @@ async function specialMailbox(client: ImapFlow, use: SpecialUse): Promise<string
   return mailbox.path;
 }
 
-function groupRefs(ids: string[]): Map<string, { accountId: string; path: string; uidValidity: string; ids: Map<number, string> }> {
-  const groups = new Map<string, { accountId: string; path: string; uidValidity: string; ids: Map<number, string> }>();
+function groupRefs(ids: string[]): Map<string, { accountMailAddress: string; path: string; uidValidity: string; ids: Map<number, string> }> {
+  const groups = new Map<string, { accountMailAddress: string; path: string; uidValidity: string; ids: Map<number, string> }>();
   for (const id of ids) {
     const ref = parseMessageId(id);
-    const key = `${ref.accountId}:${ref.uidValidity}:${ref.path}`;
-    const group = groups.get(key) ?? { accountId: ref.accountId, path: ref.path, uidValidity: ref.uidValidity, ids: new Map<number, string>() };
+    const key = `${ref.accountMailAddress}:${ref.uidValidity}:${ref.path}`;
+    const group = groups.get(key) ?? { accountMailAddress: ref.accountMailAddress, path: ref.path, uidValidity: ref.uidValidity, ids: new Map<number, string>() };
     group.ids.set(ref.uid, id);
     groups.set(key, group);
   }
@@ -454,8 +454,8 @@ function groupRefs(ids: string[]): Map<string, { accountId: string; path: string
 
 async function getStatus(accounts: Map<string, AccountConfig>, limit: number, preread: PrereadBytes) {
   return {
-    accounts: await Promise.all([...accounts].map(async ([accountId, config]) => {
-      const base = { accountId, identities: config.identities };
+    accounts: await Promise.all([...accounts].map(async ([accountMailAddress, config]) => {
+      const base = { accountMailAddress, identities: config.identities };
       try {
         return {
           ...base,
@@ -463,7 +463,7 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number, pr
             const mailboxes = await client.list({ statusQuery: { messages: true, unseen: true } });
             const output: Record<string, unknown>[] = [];
             for (const entry of mailboxes) {
-              const item: Record<string, unknown> = { mailboxId: mailboxId(accountId, entry.path), name: entry.path, specialRole: entry.specialUse?.replace(/^\\/u, "").toLowerCase() };
+              const item: Record<string, unknown> = { mailboxId: mailboxId(accountMailAddress, entry.path), name: entry.path, specialRole: entry.specialUse?.replace(/^\\/u, "").toLowerCase() };
               const status = entry.status as { messages?: number; unseen?: number; error?: unknown } | undefined;
               if (status === undefined || status.error !== undefined || status.messages === undefined) {
                 output.push({ ...item, error: status?.error === undefined ? "STATUS failed." : errorMessage((status.error as { response?: { responseText?: string } }).response?.responseText ?? status.error) });
@@ -474,7 +474,7 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number, pr
                 try {
                   const { lock, uidValidity } = await openMailbox(client, { path: entry.path });
                   try {
-                    item.unreadMessages = await summaries(client, accountId, entry.path, uidValidity, (await uidsByDate(client, { unseen: true })).slice(0, limit), preread);
+                    item.unreadMessages = await summaries(client, accountMailAddress, entry.path, uidValidity, (await uidsByDate(client, { unseen: true })).slice(0, limit), preread);
                   } finally {
                     lock.release();
                   }
@@ -497,7 +497,7 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number, pr
 async function fullMessage(client: ImapFlow, ref: MessageRef): Promise<Record<string, unknown>> {
   const { lock, uidValidity } = await openMailbox(client, ref);
   try {
-    const [message] = await summaries(client, ref.accountId, ref.path, uidValidity, [ref.uid], undefined);
+    const [message] = await summaries(client, ref.accountMailAddress, ref.path, uidValidity, [ref.uid], undefined);
     if (message === undefined) throw new Error(`Message ${ref.uid} was not found in ${ref.path}.`);
     const fetched = await client.fetchOne(String(ref.uid), { uid: true, source: true }, { uid: true });
     if (fetched === false || fetched.source === undefined) throw new Error(`Message ${ref.uid} was not found in ${ref.path}.`);
@@ -508,7 +508,7 @@ async function fullMessage(client: ImapFlow, ref: MessageRef): Promise<Record<st
   }
 }
 
-async function thread(client: ImapFlow, accountId: string, message: Record<string, unknown>, preread: PrereadBytes): Promise<Record<string, unknown>[]> {
+async function thread(client: ImapFlow, accountMailAddress: string, message: Record<string, unknown>, preread: PrereadBytes): Promise<Record<string, unknown>[]> {
   const ids = [message.internetMessageId, ...((message.references as string[] | undefined) ?? []), message.inReplyTo].filter((id): id is string => typeof id === "string");
   if (ids.length === 0) return [];
   const root = ids[1] ?? ids[0]!;
@@ -520,7 +520,7 @@ async function thread(client: ImapFlow, accountId: string, message: Record<strin
     try {
       const criteria = [{ header: { references: root } }, ...[...new Set(ids)].map((id) => ({ header: { "message-id": id } }))];
       const uids = ((await client.search({ or: criteria }, { uid: true })) || []) as number[];
-      found.push(...(await summaries(client, accountId, path, uidValidity, uids, preread)));
+      found.push(...(await summaries(client, accountMailAddress, path, uidValidity, uids, preread)));
     } finally {
       lock.release();
     }
@@ -562,14 +562,14 @@ function stripHeader(source: Buffer, name: string, replacement?: string): Buffer
   return Buffer.from(kept.join("\r\n") + body, "latin1");
 }
 
-async function perMessage(accounts: Map<string, AccountConfig>, ids: string[], operation: (client: ImapFlow, group: { accountId: string; path: string; uids: number[] }) => Promise<Map<number, string | undefined> | void>) {
+async function perMessage(accounts: Map<string, AccountConfig>, ids: string[], operation: (client: ImapFlow, group: { accountMailAddress: string; path: string; uids: number[] }) => Promise<Map<number, string | undefined> | void>) {
   const results = new Map<string, Record<string, unknown>>();
   const groups = groupRefs(ids);
   const byAccount = new Map<string, typeof groups extends Map<string, infer G> ? G[] : never>();
-  for (const group of groups.values()) byAccount.set(group.accountId, [...(byAccount.get(group.accountId) ?? []), group]);
-  await Promise.all([...byAccount].map(async ([accountId, accountGroups]) => {
+  for (const group of groups.values()) byAccount.set(group.accountMailAddress, [...(byAccount.get(group.accountMailAddress) ?? []), group]);
+  await Promise.all([...byAccount].map(async ([accountMailAddress, accountGroups]) => {
     try {
-      await withImap(account(accounts, accountId), async (client) => {
+      await withImap(account(accounts, accountMailAddress), async (client) => {
         for (const group of accountGroups) {
           try {
             const { lock } = await openMailbox(client, group);
@@ -578,7 +578,7 @@ async function perMessage(accounts: Map<string, AccountConfig>, ids: string[], o
               for (const [uid, id] of group.ids) if (!existing.has(uid)) results.set(id, { messageId: id, error: "Message not found." });
               const uids = [...group.ids.keys()].filter((uid) => existing.has(uid));
               if (uids.length === 0) continue;
-              const newIds = await operation(client, { accountId, path: group.path, uids });
+              const newIds = await operation(client, { accountMailAddress, path: group.path, uids });
               for (const uid of uids) {
                 const id = group.ids.get(uid)!;
                 results.set(id, { messageId: id, newMessageId: newIds instanceof Map ? newIds.get(uid) : undefined });
@@ -598,13 +598,13 @@ async function perMessage(accounts: Map<string, AccountConfig>, ids: string[], o
   return result({ results: ids.map((id) => results.get(id)) });
 }
 
-async function moveWithMap(client: ImapFlow, accountId: string, uids: number[], destination: string): Promise<Map<number, string | undefined>> {
+async function moveWithMap(client: ImapFlow, accountMailAddress: string, uids: number[], destination: string): Promise<Map<number, string | undefined>> {
   const response = await client.messageMove(uids.join(","), destination, { uid: true });
   if (response === false) throw new Error(`Messages could not be moved to ${destination}.`);
   const map = new Map<number, string | undefined>();
   for (const uid of uids) {
     const newUid = response.uidMap?.get(uid);
-    map.set(uid, newUid === undefined || response.uidValidity === undefined ? undefined : messageId(accountId, response.uidValidity, newUid, destination));
+    map.set(uid, newUid === undefined || response.uidValidity === undefined ? undefined : messageId(accountMailAddress, response.uidValidity, newUid, destination));
   }
   return map;
 }
@@ -657,7 +657,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "imap_get_status",
       label: "Get IMAP Mail Status",
-      description: `Get the mail status from the IMAP servers: every account (accountId, identities) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first by the Date header (or the arrival time without one) and at most maxUnreadMessagesPerMailbox per mailbox. The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
+      description: `Get the mail status from the IMAP servers: every account (accountMailAddress, identities) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first by the Date header (or the arrival time without one) and at most maxUnreadMessagesPerMailbox per mailbox. The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -688,17 +688,17 @@ export default definePluginEntry({
         },
       },
       async execute(_id: string, params: Params) {
-        const { accountId, path } = parseMailboxId(text(params, "mailboxId"));
+        const { accountMailAddress, path } = parseMailboxId(text(params, "mailboxId"));
         const limit = integer(params, "limit", 20, MAX_MESSAGES_PER_MAILBOX);
         const preread = prereadBytes(api, params);
         const sentBefore = params.sentBefore === undefined ? undefined : unixTime(params, "sentBefore");
-        return result(await withImap(account(readAccounts(api), accountId), async (client) => {
+        return result(await withImap(account(readAccounts(api), accountMailAddress), async (client) => {
           const { lock, uidValidity } = await openMailbox(client, { path });
           try {
             const uids = await uidsByDate(client, { unseen: params.unreadOnly === true, sentBefore });
             const messages: Record<string, unknown>[] = [];
             for (let start = 0; start < uids.length && messages.length < limit; start += limit) {
-              const page = await summaries(client, accountId, path, uidValidity, uids.slice(start, start + limit), preread);
+              const page = await summaries(client, accountMailAddress, path, uidValidity, uids.slice(start, start + limit), preread);
               messages.push(...page.filter((message) => sentBefore === undefined || (typeof message.date === "string" && Date.parse(message.date) < sentBefore.getTime())));
             }
             return { messages: messages.slice(0, limit) };
@@ -725,9 +725,9 @@ export default definePluginEntry({
       },
       async execute(_id: string, params: Params) {
         const ref = parseMessageId(text(params, "messageId"));
-        return result(await withImap(account(readAccounts(api), ref.accountId), async (client) => {
+        return result(await withImap(account(readAccounts(api), ref.accountMailAddress), async (client) => {
           const message = await fullMessage(client, ref);
-          return { message, thread: params.includeThread === true ? await thread(client, ref.accountId, message, prereadBytes(api, params)) : undefined };
+          return { message, thread: params.includeThread === true ? await thread(client, ref.accountMailAddress, message, prereadBytes(api, params)) : undefined };
         }));
       },
     });
@@ -751,16 +751,16 @@ export default definePluginEntry({
         const byAccount = new Map<string, string[]>();
         for (const id of ids) {
           try {
-            const { accountId } = parseMessageId(id);
-            byAccount.set(accountId, [...(byAccount.get(accountId) ?? []), id]);
+            const { accountMailAddress } = parseMessageId(id);
+            byAccount.set(accountMailAddress, [...(byAccount.get(accountMailAddress) ?? []), id]);
           } catch (error) {
             messages.set(id, { messageId: id, error: errorMessage(error) });
           }
         }
-        await Promise.all([...byAccount].map(async ([accountId, accountIds]) => {
+        await Promise.all([...byAccount].map(async ([accountMailAddress, accountMessageIds]) => {
           try {
-            await withImap(account(accounts, accountId), async (client) => {
-              for (const id of accountIds) {
+            await withImap(account(accounts, accountMailAddress), async (client) => {
+              for (const id of accountMessageIds) {
                 try {
                   messages.set(id, await fullMessage(client, parseMessageId(id)));
                 } catch (error) {
@@ -769,7 +769,7 @@ export default definePluginEntry({
               }
             });
           } catch (error) {
-            for (const id of accountIds) messages.set(id, { messageId: id, error: errorMessage(error) });
+            for (const id of accountMessageIds) messages.set(id, { messageId: id, error: errorMessage(error) });
           }
         }));
         return result({ messages: ids.map((id) => messages.get(id)) });
@@ -783,7 +783,7 @@ export default definePluginEntry({
       parameters: attachmentParameters,
       async execute(_id: string, params: Params) {
         const ref = parseMessageId(text(params, "messageId"));
-        const file = await download(account(readAccounts(api), ref.accountId), params, true);
+        const file = await download(account(readAccounts(api), ref.accountMailAddress), params, true);
         return { content: [{ type: "text" as const, text: file.data.toString("utf8") }], details: {} };
       },
     });
@@ -795,7 +795,7 @@ export default definePluginEntry({
       parameters: attachmentParameters,
       async execute(_id: string, params: Params) {
         const ref = parseMessageId(text(params, "messageId"));
-        const file = await download(account(readAccounts(api), ref.accountId), params, false);
+        const file = await download(account(readAccounts(api), ref.accountMailAddress), params, false);
         return { content: [{ type: "image" as const, data: file.data.toString("base64"), mimeType: file.contentType }], details: {} };
       },
     });
@@ -807,7 +807,7 @@ export default definePluginEntry({
       parameters: attachmentParameters,
       async execute(_id: string, params: Params) {
         const ref = parseMessageId(text(params, "messageId"));
-        const file = await download(account(readAccounts(api), ref.accountId), params, false);
+        const file = await download(account(readAccounts(api), ref.accountMailAddress), params, false);
         const saved = await saveMediaBuffer(file.data, file.contentType, "inbound", undefined, file.fileName);
         return result({ reference: `media://inbound/${saved.id}`, path: saved.path, size: saved.size, contentType: saved.contentType });
       },
@@ -820,9 +820,9 @@ export default definePluginEntry({
       parameters: {
         type: "object",
         additionalProperties: false,
-        required: ["accountId", "fromAddress", "subject", "body"],
+        required: ["accountMailAddress", "fromAddress", "subject", "body"],
         properties: {
-          accountId: { type: "string" },
+          accountMailAddress: { type: "string" },
           fromAddress: { type: "string", description: "Sender address, one of the account's identities." },
           subject: { type: "string" },
           body: { type: "string" },
@@ -834,13 +834,13 @@ export default definePluginEntry({
         },
       },
       async execute(_id: string, params: Params) {
-        const accountId = text(params, "accountId");
-        const config = account(readAccounts(api), accountId);
+        const accountMailAddress = text(params, "accountMailAddress");
+        const config = account(readAccounts(api), accountMailAddress);
         const fromAddress = text(params, "fromAddress");
         const identity = config.identities.find((entry) => entry.address.toLowerCase() === fromAddress.toLowerCase());
-        if (identity === undefined) throw new Error(`${fromAddress} is not an identity of account ${accountId}.`);
+        if (identity === undefined) throw new Error(`${fromAddress} is not an identity of account ${accountMailAddress}.`);
         const replace = params.draftMessageIdToReplace === undefined ? undefined : parseMessageId(text(params, "draftMessageIdToReplace"));
-        if (replace !== undefined && replace.accountId !== accountId) throw new Error("draftMessageIdToReplace must be a draft of the same account.");
+        if (replace !== undefined && replace.accountMailAddress !== accountMailAddress) throw new Error("draftMessageIdToReplace must be a draft of the same account.");
         const body = text(params, "body");
         const composer = new MailComposer({
           from: { name: identity.name ?? "", address: identity.address },
@@ -859,7 +859,7 @@ export default definePluginEntry({
           const { lock } = await openMailbox(client, { path: drafts });
           let savedDraft: Record<string, unknown> | undefined;
           try {
-            [savedDraft] = await summaries(client, accountId, drafts, appended.uidValidity, [appended.uid], prereadBytes(api, {}));
+            [savedDraft] = await summaries(client, accountMailAddress, drafts, appended.uidValidity, [appended.uid], prereadBytes(api, {}));
           } finally {
             lock.release();
           }
@@ -895,7 +895,7 @@ export default definePluginEntry({
       },
       async execute(_id: string, params: Params) {
         const ref = parseMessageId(text(params, "imapDraftMessageId"));
-        const config = account(readAccounts(api), ref.accountId);
+        const config = account(readAccounts(api), ref.accountMailAddress);
         return result(await withImap(config, async (client) => {
           const drafts = await specialMailbox(client, "\\Drafts");
           if (ref.path !== drafts) throw new Error(`The message is not in the drafts mailbox ${drafts}.`);
@@ -912,7 +912,7 @@ export default definePluginEntry({
           const list = (value: typeof parsed.to) => (value === undefined ? [] : Array.isArray(value) ? value : [value]).flatMap((entry) => entry.value).map((entry) => entry.address).filter((address): address is string => typeof address === "string");
           const from = list(parsed.from)[0];
           if (from === undefined || !config.identities.some((entry) => entry.address.toLowerCase() === from.toLowerCase())) {
-            throw new Error(`The From address ${from ?? "(none)"} is not an identity of account ${ref.accountId}.`);
+            throw new Error(`The From address ${from ?? "(none)"} is not an identity of account ${ref.accountMailAddress}.`);
           }
           const to = [...list(parsed.to), ...list(parsed.cc), ...list(parsed.bcc)];
           if (to.length === 0) throw new Error("The draft has no recipients.");
@@ -988,8 +988,8 @@ export default definePluginEntry({
       async execute(_id: string, params: Params) {
         const destination = parseMailboxId(text(params, "destinationMailboxId"));
         return perMessage(readAccounts(api), stringArray(params, "messageIds"), async (client, group) => {
-          if (group.accountId !== destination.accountId) throw new Error("destinationMailboxId must be a mailbox of the same account.");
-          return moveWithMap(client, group.accountId, group.uids, destination.path);
+          if (group.accountMailAddress !== destination.accountMailAddress) throw new Error("destinationMailboxId must be a mailbox of the same account.");
+          return moveWithMap(client, group.accountMailAddress, group.uids, destination.path);
         });
       },
     });
@@ -1013,7 +1013,7 @@ export default definePluginEntry({
             await client.messageDelete(group.uids.join(","), { uid: true });
             return;
           }
-          return moveWithMap(client, group.accountId, group.uids, trash);
+          return moveWithMap(client, group.accountMailAddress, group.uids, trash);
         });
       },
     });

@@ -39,7 +39,7 @@
       },
       "accounts": {
         "type": "object",
-        "description": "Mail accounts keyed by accountId, which is the email address of the mailbox.",
+        "description": "Mail accounts keyed by accountMailAddress, the email address of the mailbox.",
         "propertyNames": {
           "pattern": "^[^:@\\s]+@[^:@\\s]+$"
         },
