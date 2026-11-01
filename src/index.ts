@@ -412,6 +412,7 @@ function summary(accountMailAddress: string, path: string, uidValidity: bigint, 
   return {
     messageId: messageId(accountMailAddress, uidValidity, message.uid, path),
     mailboxId: mailboxId(accountMailAddress, path),
+    uid: message.uid,
     subject: envelope?.subject,
     date: isoDate(envelope?.date),
     receivedDate: isoDate(message.internalDate),
@@ -652,7 +653,7 @@ const prereadBytesSchema = {
 
 const SORT_ORDER_DESCRIPTION = "sortOrder tells the order of the messages: sentDate (by the Date header, or the arrival time without one) on a server with the SORT extension, or arrivalOrder (the order the messages were added to the mailbox) on a server without it.";
 
-const SUMMARY_DESCRIPTION = "Each message has messageId, mailboxId, subject, date (sent, ISO 8601 UTC), receivedDate, from, to, cc, bcc, replyTo, flags (seen, flagged, answered, deleted, draft), keywords, internetMessageId (the Message-ID header), inReplyTo, references, imipMessage, size, previewText, and attachments (attachmentId, fileName, mime, size, disposition, contentId). Keys without a value are omitted.";
+const SUMMARY_DESCRIPTION = "Each message has messageId, mailboxId, uid (the IMAP UID, which ascends in the order messages are added to the mailbox), subject, date (sent, ISO 8601 UTC), receivedDate, from, to, cc, bcc, replyTo, flags (seen, flagged, answered, deleted, draft), keywords, internetMessageId (the Message-ID header), inReplyTo, references, imipMessage, size, previewText, and attachments (attachmentId, fileName, mime, size, disposition, contentId). Keys without a value are omitted.";
 
 const attachmentParameters = {
   type: "object",
