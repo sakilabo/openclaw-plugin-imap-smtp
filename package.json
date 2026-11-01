@@ -1,0 +1,52 @@
+{
+  "name": "openclaw-plugin-imap-smtp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw tools that read and send mail directly through IMAP and SMTP.",
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "openclaw.json.sample",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.10.9"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.10.9"
+    },
+    "build": {
+      "openclawVersion": "2026.10.9"
+    }
+  },
+  "license": "UPL-1.0",
+  "dependencies": {
+    "imapflow": "^2.10.0",
+    "mailparser": "^3.14.1",
+    "nodemailer": "^10.3.1"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.9.0",
+    "@types/node": "^26.6.6",
+    "@types/nodemailer": "^8.0.2",
+    "openclaw": "^2026.10.9",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "id": "imap-smtp",
+  "name": "IMAP SMTP",
+  "description": "Reads mail through IMAP and sends mail through SMTP.",
+  "contracts": {
+    "tools": [
+      "imap_smtp_get_status",
+      "imap_smtp_list_messages",
+      "imap_smtp_get_message",
+      "imap_smtp_get_messages",
+      "imap_smtp_get_attachment_text",
+      "imap_smtp_get_attachment_image",
+      "imap_smtp_save_attachment_to_openclaw",
+      "imap_smtp_save_draft",
+      "imap_smtp_send",
+      "imap_smtp_set_flags",
+      "imap_smtp_move_messages",
+      "imap_smtp_delete_messages"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "accounts": {
+        "type": "object",
+        "description": "Mail accounts keyed by accountId. accountId must not contain a colon.",
+        "propertyNames": {
+          "pattern": "^[^:]+$"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["imap", "smtp", "identities"],
+          "properties": {
+            "imap": { "$ref": "#/$defs/server" },
+            "smtp": { "$ref": "#/$defs/server" },
+            "identities": {
+              "type": "array",
+              "minItems": 1,
+              "description": "Sender addresses that drafts and sent messages may use.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["address"],
+                "properties": {
+                  "address": { "type": "string" },
+                  "name": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "$defs": {
+      "server": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host", "port", "security", "user", "password"],
+        "properties": {
+          "host": { "type": "string" },
+          "port": { "type": "integer" },
+          "security": {
+            "type": "string",
+            "enum": ["ssl", "starttls"],
+            "description": "ssl connects with TLS; starttls upgrades the connection with STARTTLS and fails when the server does not offer it. Unencrypted connections are not supported."
+          },
+          "user": { "type": "string" },
+          "password": { "type": "string" }
+        }
+      }
+    }
+  }
+}

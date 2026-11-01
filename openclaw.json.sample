@@ -1,0 +1,32 @@
+{
+  "plugins": {
+    "entries": {
+      "imap-smtp": {
+        "enabled": true,
+        "config": {
+          "accounts": {
+            "work": {
+              "imap": {
+                "host": "imap.example.com",
+                "port": 993,
+                "security": "ssl",
+                "user": "user@example.com",
+                "password": "password"
+              },
+              "smtp": {
+                "host": "smtp.example.com",
+                "port": 587,
+                "security": "starttls",
+                "user": "user@example.com",
+                "password": "password"
+              },
+              "identities": [
+                { "address": "user@example.com", "name": "User" }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
