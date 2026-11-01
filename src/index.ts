@@ -360,12 +360,14 @@ function imapDate(date: Date): string {
   return `${Number(day)}-${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(month) - 1]}-${year}`;
 }
 
-// sentDate: newest first by the RFC 5256 SORT date, the Date header or the arrival time without one. Used with SORT.
-// arrivalOrder: newest first in the order messages were added to the mailbox, as UIDs ascend. Used without SORT.
-type SortOrder = "sentDate" | "arrivalOrder";
+// The key of the message that the messages are sorted by.
+// date: the RFC 5256 SORT date, the Date header or the arrival time without one. Used with SORT.
+// uid: the order messages were added to the mailbox, as UIDs ascend. Used without SORT.
+type SortKey = "date" | "uid";
+type SortDirection = "descending";
 
 // UIDs in the selected mailbox, newest first. sentBefore narrows by date only, so the caller filters the exact time.
-async function uidsNewestFirst(client: ImapFlow, criteria: { unseen?: boolean; sentBefore?: Date }): Promise<{ uids: number[]; sortOrder: SortOrder }> {
+async function uidsNewestFirst(client: ImapFlow, criteria: { unseen?: boolean; sentBefore?: Date }): Promise<{ uids: number[]; sortKey: SortKey; sortDirection: SortDirection }> {
   // sentBefore uses the same date as the RFC 5256 SORT date: the Date header, or the arrival time (BEFORE) without one.
   // SENTBEFORE and BEFORE compare dates in the sender's or the server's time zone, so search up to two days later.
   const sentBefore = criteria.sentBefore === undefined ? undefined : new Date(criteria.sentBefore.getTime() + 2 * 24 * 60 * 60 * 1000);
@@ -395,7 +397,7 @@ async function uidsNewestFirst(client: ImapFlow, criteria: { unseen?: boolean; s
       },
     });
     response.next();
-    return { uids, sortOrder: "sentDate" };
+    return { uids, sortKey: "date", sortDirection: "descending" };
   }
   const query: Record<string, unknown> = { all: true };
   if (criteria.unseen === true) query.seen = false;
@@ -404,7 +406,7 @@ async function uidsNewestFirst(client: ImapFlow, criteria: { unseen?: boolean; s
     query.or = [{ sentBefore: date }, { not: { header: { date: true } }, before: date }];
   }
   // Sorting by date here would need the date of every matching message, so the arrival order is used.
-  return { uids: (((await client.search(query, { uid: true })) || []) as number[]).sort((a, b) => b - a), sortOrder: "arrivalOrder" };
+  return { uids: (((await client.search(query, { uid: true })) || []) as number[]).sort((a, b) => b - a), sortKey: "uid", sortDirection: "descending" };
 }
 
 function summary(accountMailAddress: string, path: string, uidValidity: bigint, message: FetchMessageObject, preview: string | undefined): Record<string, unknown> {
@@ -486,9 +488,9 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number, pr
                 try {
                   const { lock, uidValidity } = await openMailbox(client, { path: entry.path });
                   try {
-                    const { uids, sortOrder } = await uidsNewestFirst(client, { unseen: true });
+                    const { uids, sortKey, sortDirection } = await uidsNewestFirst(client, { unseen: true });
                     item.unreadMessages = await summaries(client, accountMailAddress, entry.path, uidValidity, uids.slice(0, limit), preread);
-                    item.sortOrder = sortOrder;
+                    Object.assign(item, { sortKey, sortDirection });
                   } finally {
                     lock.release();
                   }
@@ -651,7 +653,7 @@ const prereadBytesSchema = {
   },
 };
 
-const SORT_ORDER_DESCRIPTION = "sortOrder tells the order of the messages: sentDate (by the Date header, or the arrival time without one) on a server with the SORT extension, or arrivalOrder (the order the messages were added to the mailbox) on a server without it.";
+const SORT_DESCRIPTION = "sortKey is the key of the messages they are sorted by: date (the Date header, or receivedDate without one) on a server with the SORT extension, or uid (the order the messages were added to the mailbox) on a server without it. sortDirection is descending.";
 
 const SUMMARY_DESCRIPTION = "Each message has messageId, mailboxId, uid (the IMAP UID, which ascends in the order messages are added to the mailbox), subject, date (sent, ISO 8601 UTC), receivedDate, from, to, cc, bcc, replyTo, flags (seen, flagged, answered, deleted, draft), keywords, internetMessageId (the Message-ID header), inReplyTo, references, imipMessage, size, previewText, and attachments (attachmentId, fileName, mime, size, disposition, contentId). Keys without a value are omitted.";
 
@@ -673,7 +675,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "imap_get_status",
       label: "Get IMAP Mail Status",
-      description: `Get the mail status from the IMAP servers: every account (accountMailAddress, identities) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first and at most maxUnreadMessagesPerMailbox per mailbox. ${SORT_ORDER_DESCRIPTION} The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
+      description: `Get the mail status from the IMAP servers: every account (accountMailAddress, identities) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first and at most maxUnreadMessagesPerMailbox per mailbox. ${SORT_DESCRIPTION} The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -690,7 +692,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "imap_list_messages",
       label: "List IMAP Messages",
-      description: `List messages in a mailbox, newest first. ${SORT_ORDER_DESCRIPTION} ${SUMMARY_DESCRIPTION}`,
+      description: `List messages in a mailbox, newest first. ${SORT_DESCRIPTION} ${SUMMARY_DESCRIPTION}`,
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -711,13 +713,13 @@ export default definePluginEntry({
         return result(await withImap(account(readAccounts(api), accountMailAddress), async (client) => {
           const { lock, uidValidity } = await openMailbox(client, { path });
           try {
-            const { uids, sortOrder } = await uidsNewestFirst(client, { unseen: params.unreadOnly === true, sentBefore });
+            const { uids, sortKey, sortDirection } = await uidsNewestFirst(client, { unseen: params.unreadOnly === true, sentBefore });
             const messages: Record<string, unknown>[] = [];
             for (let start = 0; start < uids.length && messages.length < limit; start += limit) {
               const page = await summaries(client, accountMailAddress, path, uidValidity, uids.slice(start, start + limit), preread);
               messages.push(...page.filter((message) => sentBefore === undefined || Date.parse(String(message.date ?? message.receivedDate)) < sentBefore.getTime()));
             }
-            return { sortOrder, messages: messages.slice(0, limit) };
+            return { sortKey, sortDirection, messages: messages.slice(0, limit) };
           } finally {
             lock.release();
           }
