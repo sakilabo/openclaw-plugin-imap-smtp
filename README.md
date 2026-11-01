@@ -1,6 +1,10 @@
 # IMAP SMTP for OpenClaw
 
-OpenClaw plugin that gives agents tools to read mail through IMAP and send mail through SMTP. The plugin works directly with the mail servers, so agents share the mailboxes, flags, and drafts with any other mail client of the same accounts.
+OpenClaw plugin that lets an agent use its own mailbox. The agent checks new mail, reads messages and attachments, writes drafts, sends them, and files or deletes messages, working directly with the IMAP and SMTP servers of its account. The mailboxes, flags, and drafts stay on the mail server, so people and other mail clients share them with the agent.
+
+## Limitations
+
+- There is no tool to search messages.
 
 ## Tools
 
@@ -10,7 +14,7 @@ The plugin finds the drafts, sent, and trash mailboxes by their special use, whi
 
 Messages in lists have `messageId`, `mailboxId`, `uid`, `subject`, `date` (sent), `receivedDate`, the addresses, `flags`, `keywords`, `internetMessageId`, `inReplyTo`, `references`, `imipMessage`, `size`, `previewText`, and `attachments`. `previewText` is made from the first bytes of the `text/plain` part, or of the `text/html` part of a message without `text/plain`; a character, an encoded unit, or an HTML tag cut at the end is left out.
 
-Lists of messages are sorted by `sortKey` in `sortDirection`, which the result has. `sortKey` is `date` (the Date header, or `receivedDate` without one) on a server with the SORT extension, or `uid` (the order the messages were added to the mailbox) on a server without it.
+Lists of messages are sorted by `sortKey` in `sortDirection`, which the result has. `sortKey` is `date` (the Date header, or `receivedDate` without one) on a server with the SORT extension, or `uid` (the order the messages were added to the mailbox) on a server without it, or when the SORT command cannot be sent.
 
 ### `imap_get_status`
 
