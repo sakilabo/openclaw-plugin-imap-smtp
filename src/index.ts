@@ -50,8 +50,23 @@ type AttachmentInfo = {
 };
 
 const MAX_MESSAGES_PER_MAILBOX = 100;
-const PREVIEW_BYTES = 2048;
-const PREVIEW_LENGTH = 200;
+const DEFAULT_PREREAD_PLAIN_BYTES = 1024;
+const DEFAULT_PREREAD_HTML_BYTES = 2048;
+
+type PrereadBytes = { plain: number; html: number };
+
+// Bytes read from the start of a text/plain or text/html part to make previewText.
+function prereadBytes(api: OpenClawPluginApi, params: Params): PrereadBytes {
+  const positive = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1;
+  const bytes = (name: string, fallback: number) => {
+    const configured = api.pluginConfig?.[name] ?? fallback;
+    if (!positive(configured)) throw new Error(`${name} in plugins.entries.imap-smtp.config must be a positive integer.`);
+    const value = params[name] ?? configured;
+    if (!positive(value)) throw new Error(`${name} must be a positive integer.`);
+    return value;
+  };
+  return { plain: bytes("prereadPlainBytes", DEFAULT_PREREAD_PLAIN_BYTES), html: bytes("prereadHtmlBytes", DEFAULT_PREREAD_HTML_BYTES) };
+}
 
 function readAccounts(api: OpenClawPluginApi): Map<string, AccountConfig> {
   const raw = api.pluginConfig?.accounts;
@@ -254,14 +269,16 @@ function previewPart(structure: MessageStructureObject | undefined): MessageStru
   return plain ?? html;
 }
 
+// Decodes the first bytes of a text part. The data may end in the middle of an encoded unit or a character.
 function decodeTransfer(data: Buffer, encoding: string | undefined): Buffer {
   switch ((encoding ?? "").toLowerCase()) {
     case "base64": {
-      const compact = data.toString("latin1").replace(/[^A-Za-z0-9+/]/gu, "");
+      // The padding "=" is kept, so a part read to its end is decoded to its last byte.
+      const compact = data.toString("latin1").replace(/[^A-Za-z0-9+/=]/gu, "");
       return Buffer.from(compact.slice(0, compact.length - (compact.length % 4)), "base64");
     }
     case "quoted-printable": {
-      const source = data.toString("latin1").replace(/=\r?\n/gu, "");
+      const source = data.toString("latin1").replace(/=(?:[0-9A-Fa-f]?|\r)$/u, "").replace(/=\r?\n/gu, "");
       return Buffer.from(source.replace(/=([0-9A-Fa-f]{2})/gu, (_match, hex: string) => String.fromCharCode(parseInt(hex, 16))), "latin1");
     }
     default:
@@ -270,17 +287,26 @@ function decodeTransfer(data: Buffer, encoding: string | undefined): Buffer {
 }
 
 function decodeCharset(data: Buffer, charset: string | undefined): string {
+  let decoder: TextDecoder;
   try {
-    return new TextDecoder(charset ?? "utf-8").decode(data);
+    decoder = new TextDecoder(charset ?? "utf-8");
   } catch {
-    return new TextDecoder("utf-8").decode(data);
+    decoder = new TextDecoder("utf-8");
   }
+  // stream: true keeps an incomplete character at the end out of the output.
+  return decoder.decode(data, { stream: true });
 }
 
 function previewText(part: MessageStructureObject, data: Buffer): string {
   let content = decodeCharset(decodeTransfer(data, part.encoding), part.parameters?.charset);
-  if (part.type === "text/html") content = content.replace(/<(style|script)[^>]*>[\s\S]*?<\/\1>/giu, " ").replace(/<[^>]*>/gu, " ");
-  return content.replace(/\s+/gu, " ").trim().slice(0, PREVIEW_LENGTH);
+  if (part.type === "text/html") {
+    content = content
+      .replace(/<(style|script)[^>]*>[\s\S]*?<\/\1>/giu, " ")
+      .replace(/<(style|script)[^>]*>[\s\S]*$/iu, " ")
+      .replace(/<[^>]*>/gu, " ")
+      .replace(/<[^>]*$/u, " ");
+  }
+  return content.replace(/\s+/gu, " ").trim();
 }
 
 function referencesOf(headers: Buffer | undefined): string[] | undefined {
@@ -290,28 +316,78 @@ function referencesOf(headers: Buffer | undefined): string[] | undefined {
 
 const SUMMARY_QUERY = { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true, headers: ["references"] };
 
-async function summaries(client: ImapFlow, accountId: string, path: string, uidValidity: bigint, uids: number[]): Promise<Record<string, unknown>[]> {
+async function summaries(client: ImapFlow, accountId: string, path: string, uidValidity: bigint, uids: number[], preread: PrereadBytes | undefined): Promise<Record<string, unknown>[]> {
   if (uids.length === 0) return [];
   const messages = await client.fetchAll(uids.join(","), SUMMARY_QUERY, { uid: true });
   const previews = new Map<number, string>();
   const byPart = new Map<string, { part: MessageStructureObject; uids: number[] }>();
-  for (const message of messages) {
-    const part = previewPart(message.bodyStructure);
-    const key = part?.part ?? (part ? "1" : undefined);
-    if (part === undefined || key === undefined) continue;
-    const entry = byPart.get(`${key}|${part.encoding}|${part.parameters?.charset}|${part.type}`) ?? { part: { ...part, part: key }, uids: [] };
-    entry.uids.push(message.uid);
-    byPart.set(`${key}|${part.encoding}|${part.parameters?.charset}|${part.type}`, entry);
-  }
-  for (const { part, uids: partUids } of byPart.values()) {
-    for (const message of await client.fetchAll(partUids.join(","), { uid: true, bodyParts: [{ key: part.part!, maxLength: PREVIEW_BYTES }] }, { uid: true })) {
-      const data = message.bodyParts?.get(part.part!);
-      if (data !== undefined) previews.set(message.uid, previewText(part, data));
+  // Without preread, previewText is not made.
+  if (preread !== undefined) {
+    for (const message of messages) {
+      const part = previewPart(message.bodyStructure);
+      const key = part?.part ?? (part ? "1" : undefined);
+      if (part === undefined || key === undefined) continue;
+      const entry = byPart.get(`${key}|${part.encoding}|${part.parameters?.charset}|${part.type}`) ?? { part: { ...part, part: key }, uids: [] };
+      entry.uids.push(message.uid);
+      byPart.set(`${key}|${part.encoding}|${part.parameters?.charset}|${part.type}`, entry);
+    }
+    for (const { part, uids: partUids } of byPart.values()) {
+      const maxLength = part.type === "text/html" ? preread.html : preread.plain;
+      for (const message of await client.fetchAll(partUids.join(","), { uid: true, bodyParts: [{ key: part.part!, maxLength }] }, { uid: true })) {
+        const data = message.bodyParts?.get(part.part!);
+        if (data !== undefined) previews.set(message.uid, previewText(part, data));
+      }
     }
   }
-  return messages
-    .map((message) => summary(accountId, path, uidValidity, message, previews.get(message.uid)))
-    .sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
+  const byUid = new Map(messages.map((message) => [message.uid, message]));
+  return uids.flatMap((uid) => {
+    const message = byUid.get(uid);
+    return message === undefined ? [] : [summary(accountId, path, uidValidity, message, previews.get(message.uid))];
+  });
+}
+
+type ImapAttribute = { type: "ATOM"; value: string } | ImapAttribute[];
+type ImapExec = (command: string, attributes: ImapAttribute[], options: { untagged: Record<string, (response: { numbers?: number[]; attributes?: { value?: unknown }[] }) => Promise<void>> }) => Promise<{ next(): void }>;
+
+function imapDate(date: Date): string {
+  const [year, month, day] = date.toISOString().slice(0, 10).split("-");
+  return `${Number(day)}-${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(month) - 1]}-${year}`;
+}
+
+// UIDs in the selected mailbox, newest first by the RFC 5256 SORT date: the Date header, or the arrival time without one.
+// sentBefore narrows by date only, so the caller filters the exact time.
+async function uidsByDate(client: ImapFlow, criteria: { unseen?: boolean; sentBefore?: Date }): Promise<number[]> {
+  // SENTBEFORE compares the date in the sender's time zone, so search up to two days later.
+  const sentBefore = criteria.sentBefore === undefined ? undefined : new Date(criteria.sentBefore.getTime() + 2 * 24 * 60 * 60 * 1000);
+  if (client.capabilities.has("SORT")) {
+    const keys: ImapAttribute[] = [];
+    if (criteria.unseen === true) keys.push({ type: "ATOM", value: "UNSEEN" });
+    if (sentBefore !== undefined) keys.push({ type: "ATOM", value: "SENTBEFORE" }, { type: "ATOM", value: imapDate(sentBefore) });
+    if (keys.length === 0) keys.push({ type: "ATOM", value: "ALL" });
+    const uids: number[] = [];
+    // imapflow has no SORT command, so it is sent through the connection's command queue.
+    const exec = (client as unknown as { exec: ImapExec }).exec.bind(client);
+    const response = await exec("UID SORT", [[{ type: "ATOM", value: "REVERSE" }, { type: "ATOM", value: "DATE" }], { type: "ATOM", value: "UTF-8" }, ...keys], {
+      untagged: {
+        SORT: async (untagged) => {
+          uids.push(...(untagged.numbers ?? (untagged.attributes ?? []).map((attribute) => Number(attribute.value))));
+        },
+      },
+    });
+    response.next();
+    return uids;
+  }
+  const query: Record<string, unknown> = { all: true };
+  if (criteria.unseen === true) query.seen = false;
+  if (sentBefore !== undefined) query.sentBefore = new Date(`${sentBefore.toISOString().slice(0, 10)}T00:00:00Z`);
+  const uids = ((await client.search(query, { uid: true })) || []) as number[];
+  if (uids.length === 0) return [];
+  const messages = await client.fetchAll(uids.join(","), { uid: true, envelope: true, internalDate: true }, { uid: true });
+  const time = (message: FetchMessageObject) => {
+    const sent = message.envelope?.date === undefined ? undefined : new Date(message.envelope.date).getTime();
+    return sent === undefined || Number.isNaN(sent) ? new Date(message.internalDate ?? 0).getTime() : sent;
+  };
+  return messages.sort((a, b) => time(b) - time(a) || b.uid - a.uid).map((message) => message.uid);
 }
 
 function summary(accountId: string, path: string, uidValidity: bigint, message: FetchMessageObject, preview: string | undefined): Record<string, unknown> {
@@ -370,7 +446,7 @@ function groupRefs(ids: string[]): Map<string, { accountId: string; path: string
   return groups;
 }
 
-async function getStatus(accounts: Map<string, AccountConfig>, limit: number) {
+async function getStatus(accounts: Map<string, AccountConfig>, limit: number, preread: PrereadBytes) {
   return {
     accounts: await Promise.all([...accounts].map(async ([accountId, config]) => {
       const base = { accountId, identities: config.identities };
@@ -392,8 +468,7 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number) {
                 try {
                   const { lock, uidValidity } = await openMailbox(client, { path: entry.path });
                   try {
-                    const uids = ((await client.search({ seen: false }, { uid: true })) || []) as number[];
-                    item.unreadMessages = await summaries(client, accountId, entry.path, uidValidity, uids.sort((a, b) => b - a).slice(0, limit));
+                    item.unreadMessages = await summaries(client, accountId, entry.path, uidValidity, (await uidsByDate(client, { unseen: true })).slice(0, limit), preread);
                   } finally {
                     lock.release();
                   }
@@ -416,7 +491,7 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number) {
 async function fullMessage(client: ImapFlow, ref: MessageRef): Promise<Record<string, unknown>> {
   const { lock, uidValidity } = await openMailbox(client, ref);
   try {
-    const [message] = await summaries(client, ref.accountId, ref.path, uidValidity, [ref.uid]);
+    const [message] = await summaries(client, ref.accountId, ref.path, uidValidity, [ref.uid], undefined);
     if (message === undefined) throw new Error(`Message ${ref.uid} was not found in ${ref.path}.`);
     const fetched = await client.fetchOne(String(ref.uid), { uid: true, source: true }, { uid: true });
     if (fetched === false || fetched.source === undefined) throw new Error(`Message ${ref.uid} was not found in ${ref.path}.`);
@@ -427,7 +502,7 @@ async function fullMessage(client: ImapFlow, ref: MessageRef): Promise<Record<st
   }
 }
 
-async function thread(client: ImapFlow, accountId: string, message: Record<string, unknown>): Promise<Record<string, unknown>[]> {
+async function thread(client: ImapFlow, accountId: string, message: Record<string, unknown>, preread: PrereadBytes): Promise<Record<string, unknown>[]> {
   const ids = [message.internetMessageId, ...((message.references as string[] | undefined) ?? []), message.inReplyTo].filter((id): id is string => typeof id === "string");
   if (ids.length === 0) return [];
   const root = ids[1] ?? ids[0]!;
@@ -439,7 +514,7 @@ async function thread(client: ImapFlow, accountId: string, message: Record<strin
     try {
       const criteria = [{ header: { references: root } }, ...[...new Set(ids)].map((id) => ({ header: { "message-id": id } }))];
       const uids = ((await client.search({ or: criteria }, { uid: true })) || []) as number[];
-      found.push(...(await summaries(client, accountId, path, uidValidity, uids)));
+      found.push(...(await summaries(client, accountId, path, uidValidity, uids, preread)));
     } finally {
       lock.release();
     }
@@ -543,6 +618,19 @@ const recipientSchema = {
 
 const messageIdsSchema = { type: "array", minItems: 1, items: { type: "string" } };
 const PER_MESSAGE_RESULT_DESCRIPTION = "results has messageId and, when the message failed, error for each message.";
+const prereadBytesSchema = {
+  prereadPlainBytes: {
+    type: "integer",
+    minimum: 1,
+    description: "Bytes read from the start of a text/plain part to make previewText. Defaults to prereadPlainBytes in the plugin config, or 1024 when it is not set.",
+  },
+  prereadHtmlBytes: {
+    type: "integer",
+    minimum: 1,
+    description: "Bytes read from the start of a text/html part to make previewText of a message without a text/plain part. Defaults to prereadHtmlBytes in the plugin config, or 2048 when it is not set.",
+  },
+};
+
 const SUMMARY_DESCRIPTION = "Each message has messageId, mailboxId, subject, date (sent, ISO 8601 UTC), receivedDate, from, to, cc, bcc, replyTo, flags (seen, flagged, answered, deleted, draft), keywords, internetMessageId (the Message-ID header), inReplyTo, references, imipMessage, size, previewText, and attachments (attachmentId, fileName, mime, size, disposition, contentId). Keys without a value are omitted.";
 
 const attachmentParameters = {
@@ -561,25 +649,26 @@ export default definePluginEntry({
   description: "Reads mail through IMAP and sends mail through SMTP.",
   register(api) {
     api.registerTool({
-      name: "imap_smtp_get_status",
+      name: "imap_get_status",
       label: "Get IMAP Mail Status",
-      description: `Get the mail status from the IMAP servers: every account (accountId, identities) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first and at most maxUnreadMessagesPerMailbox per mailbox. The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
+      description: `Get the mail status from the IMAP servers: every account (accountId, identities) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first by the Date header (or the arrival time without one) and at most maxUnreadMessagesPerMailbox per mailbox. The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
       parameters: {
         type: "object",
         additionalProperties: false,
         properties: {
           maxUnreadMessagesPerMailbox: { type: "integer", minimum: 1, maximum: MAX_MESSAGES_PER_MAILBOX, default: 10 },
+          ...prereadBytesSchema,
         },
       },
       async execute(_id: string, params: Params) {
-        return result(await getStatus(readAccounts(api), integer(params, "maxUnreadMessagesPerMailbox", 10, MAX_MESSAGES_PER_MAILBOX)));
+        return result(await getStatus(readAccounts(api), integer(params, "maxUnreadMessagesPerMailbox", 10, MAX_MESSAGES_PER_MAILBOX), prereadBytes(api, params)));
       },
     });
 
     api.registerTool({
-      name: "imap_smtp_list_messages",
+      name: "imap_list_messages",
       label: "List IMAP Messages",
-      description: `List messages in a mailbox, newest arrival first. ${SUMMARY_DESCRIPTION}`,
+      description: `List messages in a mailbox, newest first by the Date header, or by the arrival time without one. ${SUMMARY_DESCRIPTION}`,
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -589,22 +678,21 @@ export default definePluginEntry({
           limit: { type: "integer", minimum: 1, maximum: MAX_MESSAGES_PER_MAILBOX, default: 20 },
           unreadOnly: { type: "boolean", default: false },
           sentBefore: { type: "string", format: "date-time", description: "List only messages sent before this time, in ISO 8601 with a time zone, such as the date of a message. A message sent at exactly this time is not included." },
+          ...prereadBytesSchema,
         },
       },
       async execute(_id: string, params: Params) {
         const { accountId, path } = parseMailboxId(text(params, "mailboxId"));
         const limit = integer(params, "limit", 20, MAX_MESSAGES_PER_MAILBOX);
+        const preread = prereadBytes(api, params);
         const sentBefore = params.sentBefore === undefined ? undefined : unixTime(params, "sentBefore");
         return result(await withImap(account(readAccounts(api), accountId), async (client) => {
           const { lock, uidValidity } = await openMailbox(client, { path });
           try {
-            const criteria: Record<string, unknown> = params.unreadOnly === true ? { seen: false } : { all: true };
-            // SENTBEFORE compares dates only, so search up to the next day and filter by the exact time.
-            if (sentBefore !== undefined) criteria.sentBefore = new Date(sentBefore.getTime() + 24 * 60 * 60 * 1000);
-            const uids = (((await client.search(criteria, { uid: true })) || []) as number[]).sort((a, b) => b - a);
+            const uids = await uidsByDate(client, { unseen: params.unreadOnly === true, sentBefore });
             const messages: Record<string, unknown>[] = [];
             for (let start = 0; start < uids.length && messages.length < limit; start += limit) {
-              const page = await summaries(client, accountId, path, uidValidity, uids.slice(start, start + limit));
+              const page = await summaries(client, accountId, path, uidValidity, uids.slice(start, start + limit), preread);
               messages.push(...page.filter((message) => sentBefore === undefined || (typeof message.date === "string" && Date.parse(message.date) < sentBefore.getTime())));
             }
             return { messages: messages.slice(0, limit) };
@@ -616,7 +704,7 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_get_message",
+      name: "imap_get_message",
       label: "Get IMAP Message",
       description: "Get a message with its body (bodyText and bodyHtml) and the items of the message list, except previewText. With includeThread, thread lists the messages of the same conversation found in the message's mailbox, INBOX, and the sent mailbox. The message is not marked as read.",
       parameters: {
@@ -626,21 +714,22 @@ export default definePluginEntry({
         properties: {
           messageId: { type: "string" },
           includeThread: { type: "boolean", default: false },
+          ...prereadBytesSchema,
         },
       },
       async execute(_id: string, params: Params) {
         const ref = parseMessageId(text(params, "messageId"));
         return result(await withImap(account(readAccounts(api), ref.accountId), async (client) => {
           const message = await fullMessage(client, ref);
-          return { message, thread: params.includeThread === true ? await thread(client, ref.accountId, message) : undefined };
+          return { message, thread: params.includeThread === true ? await thread(client, ref.accountId, message, prereadBytes(api, params)) : undefined };
         }));
       },
     });
 
     api.registerTool({
-      name: "imap_smtp_get_messages",
+      name: "imap_get_messages",
       label: "Get IMAP Messages",
-      description: "Get messages with their bodies, as imap_smtp_get_message does without threads. When a message cannot be read, its entry has messageId and error. The messages are not marked as read.",
+      description: "Get messages with their bodies, as imap_get_message does without threads. When a message cannot be read, its entry has messageId and error. The messages are not marked as read.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -682,7 +771,7 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_get_attachment_text",
+      name: "imap_get_attachment_text",
       label: "Get IMAP Attachment Text",
       description: "Get the content of an attachment as text. Text parts are converted to UTF-8 from their charset; other parts are decoded as UTF-8. The content is returned as text whatever the type of the attachment is.",
       parameters: attachmentParameters,
@@ -694,7 +783,7 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_get_attachment_image",
+      name: "imap_get_attachment_image",
       label: "Get IMAP Attachment Image",
       description: "Get the content of an attachment as an image, with the content type of the attachment. The content is returned as an image whatever the type of the attachment is.",
       parameters: attachmentParameters,
@@ -706,7 +795,7 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_save_attachment_to_openclaw",
+      name: "imap_save_attachment_to_openclaw",
       label: "Save IMAP Attachment to OpenClaw",
       description: "Save an attachment as a file in OpenClaw, so that OpenClaw tools can read it. Returns reference (media://inbound/...), path, size, and contentType of the saved file. Files larger than 5 MiB cannot be saved.",
       parameters: attachmentParameters,
@@ -719,7 +808,7 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_save_draft",
+      name: "imap_save_draft",
       label: "Save IMAP Draft",
       description: "Save a message as a draft in the drafts mailbox of the account, and return it as savedDraft with the items of the message list. fromAddress must be one of the account's identities. To edit a draft, save the edited message with draftMessageIdToReplace; the old draft is deleted permanently only after the new draft is saved, because a saved message cannot be changed on the mail server.",
       parameters: {
@@ -764,7 +853,7 @@ export default definePluginEntry({
           const { lock } = await openMailbox(client, { path: drafts });
           let savedDraft: Record<string, unknown> | undefined;
           try {
-            [savedDraft] = await summaries(client, accountId, drafts, appended.uidValidity, [appended.uid]);
+            [savedDraft] = await summaries(client, accountId, drafts, appended.uidValidity, [appended.uid], prereadBytes(api, {}));
           } finally {
             lock.release();
           }
@@ -787,19 +876,19 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_send",
+      name: "smtp_send",
       label: "Send IMAP Draft",
-      description: "Send a draft saved with imap_smtp_save_draft from the drafts mailbox through SMTP, with its From, recipients, subject, body, and attachments. A copy is saved in the sent mailbox, and the draft is deleted permanently, only after the message is sent. The From address must be one of the account's identities.",
+      description: "Send a draft saved with imap_save_draft from the drafts mailbox through SMTP, with its From, recipients, subject, body, and attachments. A copy is saved in the sent mailbox, and the draft is deleted permanently, only after the message is sent. The From address must be one of the account's identities.",
       parameters: {
         type: "object",
         additionalProperties: false,
-        required: ["draftMessageId"],
+        required: ["imapDraftMessageId"],
         properties: {
-          draftMessageId: { type: "string", description: "messageId of the draft." },
+          imapDraftMessageId: { type: "string", description: "messageId of the draft in the IMAP drafts mailbox, as returned by imap_save_draft." },
         },
       },
       async execute(_id: string, params: Params) {
-        const ref = parseMessageId(text(params, "draftMessageId"));
+        const ref = parseMessageId(text(params, "imapDraftMessageId"));
         const config = account(readAccounts(api), ref.accountId);
         return result(await withImap(config, async (client) => {
           const drafts = await specialMailbox(client, "\\Drafts");
@@ -841,13 +930,13 @@ export default definePluginEntry({
           } catch (error) {
             draftDeleteError = errorMessage(error);
           }
-          return { sent: true, sentCopyError, deletedDraftMessageId: draftDeleteError === undefined ? text(params, "draftMessageId") : undefined, draftDeleteError };
+          return { sent: true, sentCopyError, deletedImapDraftMessageId: draftDeleteError === undefined ? text(params, "imapDraftMessageId") : undefined, draftDeleteError };
         }));
       },
     });
 
     api.registerTool({
-      name: "imap_smtp_set_flags",
+      name: "imap_set_flags",
       label: "Set IMAP Flags",
       description: `Set (true) or clear (false) flags of messages. {"seen": true} marks messages as read and {"seen": false} as unread. ${PER_MESSAGE_RESULT_DESCRIPTION}`,
       parameters: {
@@ -878,7 +967,7 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_move_messages",
+      name: "imap_move_messages",
       label: "Move IMAP Messages",
       description: `Move messages to another mailbox of the same account. A moved message gets a new messageId, returned as newMessageId. ${PER_MESSAGE_RESULT_DESCRIPTION}`,
       parameters: {
@@ -900,7 +989,7 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "imap_smtp_delete_messages",
+      name: "imap_delete_messages",
       label: "Delete IMAP Messages",
       description: `Delete messages. Messages are moved to the trash mailbox, and returned with newMessageId; messages already in the trash mailbox are deleted permanently. ${PER_MESSAGE_RESULT_DESCRIPTION}`,
       parameters: {

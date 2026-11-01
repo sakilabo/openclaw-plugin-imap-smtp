@@ -4,6 +4,8 @@
       "imap-smtp": {
         "enabled": true,
         "config": {
+          "prereadPlainBytes": 1024,
+          "prereadHtmlBytes": 2048,
           "accounts": {
             "work": {
               "imap": {

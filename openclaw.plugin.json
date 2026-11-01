@@ -4,18 +4,18 @@
   "description": "Reads mail through IMAP and sends mail through SMTP.",
   "contracts": {
     "tools": [
-      "imap_smtp_get_status",
-      "imap_smtp_list_messages",
-      "imap_smtp_get_message",
-      "imap_smtp_get_messages",
-      "imap_smtp_get_attachment_text",
-      "imap_smtp_get_attachment_image",
-      "imap_smtp_save_attachment_to_openclaw",
-      "imap_smtp_save_draft",
-      "imap_smtp_send",
-      "imap_smtp_set_flags",
-      "imap_smtp_move_messages",
-      "imap_smtp_delete_messages"
+      "imap_get_status",
+      "imap_list_messages",
+      "imap_get_message",
+      "imap_get_messages",
+      "imap_get_attachment_text",
+      "imap_get_attachment_image",
+      "imap_save_attachment_to_openclaw",
+      "imap_save_draft",
+      "smtp_send",
+      "imap_set_flags",
+      "imap_move_messages",
+      "imap_delete_messages"
     ]
   },
   "activation": {
@@ -25,6 +25,18 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "prereadPlainBytes": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 1024,
+        "description": "Default number of bytes read from the start of a text/plain part to make previewText. The tools' prereadPlainBytes parameter overrides it."
+      },
+      "prereadHtmlBytes": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 2048,
+        "description": "Default number of bytes read from the start of a text/html part to make previewText of a message without a text/plain part. The tools' prereadHtmlBytes parameter overrides it."
+      },
       "accounts": {
         "type": "object",
         "description": "Mail accounts keyed by accountId. accountId must not contain a colon.",
