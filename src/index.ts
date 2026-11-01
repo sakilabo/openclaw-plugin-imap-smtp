@@ -352,7 +352,7 @@ async function summaries(client: ImapFlow, accountMailAddress: string, path: str
   });
 }
 
-type ImapAttribute = { type: "ATOM"; value: string } | ImapAttribute[];
+type ImapAttribute = { type: "ATOM" | "STRING"; value: string } | ImapAttribute[];
 type ImapExec = (command: string, attributes: ImapAttribute[], options: { untagged: Record<string, (response: { numbers?: number[]; attributes?: { value?: unknown }[] }) => Promise<void>> }) => Promise<{ next(): void }>;
 
 function imapDate(date: Date): string {
@@ -366,12 +366,23 @@ type SortOrder = "sentDate" | "arrivalOrder";
 
 // UIDs in the selected mailbox, newest first. sentBefore narrows by date only, so the caller filters the exact time.
 async function uidsNewestFirst(client: ImapFlow, criteria: { unseen?: boolean; sentBefore?: Date }): Promise<{ uids: number[]; sortOrder: SortOrder }> {
-  // SENTBEFORE compares the date in the sender's time zone, so search up to two days later.
+  // sentBefore uses the same date as the RFC 5256 SORT date: the Date header, or the arrival time (BEFORE) without one.
+  // SENTBEFORE and BEFORE compare dates in the sender's or the server's time zone, so search up to two days later.
   const sentBefore = criteria.sentBefore === undefined ? undefined : new Date(criteria.sentBefore.getTime() + 2 * 24 * 60 * 60 * 1000);
   if (client.capabilities.has("SORT")) {
     const keys: ImapAttribute[] = [];
     if (criteria.unseen === true) keys.push({ type: "ATOM", value: "UNSEEN" });
-    if (sentBefore !== undefined) keys.push({ type: "ATOM", value: "SENTBEFORE" }, { type: "ATOM", value: imapDate(sentBefore) });
+    if (sentBefore !== undefined) {
+      const date: ImapAttribute = { type: "ATOM", value: imapDate(sentBefore) };
+      keys.push({ type: "ATOM", value: "OR" }, { type: "ATOM", value: "SENTBEFORE" }, date, [
+        { type: "ATOM", value: "NOT" },
+        { type: "ATOM", value: "HEADER" },
+        { type: "ATOM", value: "DATE" },
+        { type: "STRING", value: "" },
+        { type: "ATOM", value: "BEFORE" },
+        date,
+      ]);
+    }
     if (keys.length === 0) keys.push({ type: "ATOM", value: "ALL" });
     const uids: number[] = [];
     // imapflow has no SORT command, so it is sent through the connection's command queue.
@@ -388,7 +399,10 @@ async function uidsNewestFirst(client: ImapFlow, criteria: { unseen?: boolean; s
   }
   const query: Record<string, unknown> = { all: true };
   if (criteria.unseen === true) query.seen = false;
-  if (sentBefore !== undefined) query.sentBefore = new Date(`${sentBefore.toISOString().slice(0, 10)}T00:00:00Z`);
+  if (sentBefore !== undefined) {
+    const date = new Date(`${sentBefore.toISOString().slice(0, 10)}T00:00:00Z`);
+    query.or = [{ sentBefore: date }, { not: { header: { date: true } }, before: date }];
+  }
   // Sorting by date here would need the date of every matching message, so the arrival order is used.
   return { uids: (((await client.search(query, { uid: true })) || []) as number[]).sort((a, b) => b - a), sortOrder: "arrivalOrder" };
 }
@@ -684,7 +698,7 @@ export default definePluginEntry({
           mailboxId: { type: "string" },
           limit: { type: "integer", minimum: 1, maximum: MAX_MESSAGES_PER_MAILBOX, default: 20 },
           unreadOnly: { type: "boolean", default: false },
-          sentBefore: { type: "string", format: "date-time", description: "List only messages sent before this time, in ISO 8601 with a time zone, such as the date of a message. A message sent at exactly this time is not included." },
+          sentBefore: { type: "string", format: "date-time", description: "List only messages sent before this time, in ISO 8601 with a time zone, such as the date of a message. A message sent at exactly this time is not included. A message without date is compared by its receivedDate." },
           ...prereadBytesSchema,
         },
       },
@@ -700,7 +714,7 @@ export default definePluginEntry({
             const messages: Record<string, unknown>[] = [];
             for (let start = 0; start < uids.length && messages.length < limit; start += limit) {
               const page = await summaries(client, accountMailAddress, path, uidValidity, uids.slice(start, start + limit), preread);
-              messages.push(...page.filter((message) => sentBefore === undefined || (typeof message.date === "string" && Date.parse(message.date) < sentBefore.getTime())));
+              messages.push(...page.filter((message) => sentBefore === undefined || Date.parse(String(message.date ?? message.receivedDate)) < sentBefore.getTime()));
             }
             return { sortOrder, messages: messages.slice(0, limit) };
           } finally {
