@@ -25,7 +25,7 @@ The plugin finds the drafts, sent, and trash mailboxes by their special use, whi
 
 ## Configuration
 
-Set the accounts in `plugins.entries.imap-smtp.config.accounts` of `openclaw.json`. [`openclaw.json.sample`](openclaw.json.sample) lists the items.
+Set the accounts in `plugins.entries.imap-smtp.config.accounts` of `openclaw.json`, keyed by the email address of each mailbox. The email address is the `accountId`. [`openclaw.json.sample`](openclaw.json.sample) lists the items.
 
 | Item | Value |
 | --- | --- |

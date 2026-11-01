@@ -7,7 +7,7 @@
           "prereadPlainBytes": 1024,
           "prereadHtmlBytes": 2048,
           "accounts": {
-            "work": {
+            "user@example.com": {
               "imap": {
                 "host": "imap.example.com",
                 "port": 993,

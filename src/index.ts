@@ -50,6 +50,8 @@ type AttachmentInfo = {
 };
 
 const MAX_MESSAGES_PER_MAILBOX = 100;
+// accountId is the email address of the mailbox. It has no colon, which separates the parts of the IDs.
+const ACCOUNT_ID_PATTERN = /^[^:@\s]+@[^:@\s]+$/u;
 const DEFAULT_PREREAD_PLAIN_BYTES = 1024;
 const DEFAULT_PREREAD_HTML_BYTES = 2048;
 
@@ -73,7 +75,11 @@ function readAccounts(api: OpenClawPluginApi): Map<string, AccountConfig> {
   if (raw === null || typeof raw !== "object" || Object.keys(raw).length === 0) {
     throw new Error("imap-smtp is not configured. Set accounts in plugins.entries.imap-smtp.config.");
   }
-  return new Map(Object.entries(raw as Record<string, AccountConfig>));
+  const accounts = new Map(Object.entries(raw as Record<string, AccountConfig>));
+  for (const accountId of accounts.keys()) {
+    if (!ACCOUNT_ID_PATTERN.test(accountId)) throw new Error(`Account ${accountId} must be keyed by the email address of its mailbox.`);
+  }
+  return accounts;
 }
 
 function account(accounts: Map<string, AccountConfig>, accountId: string): AccountConfig {

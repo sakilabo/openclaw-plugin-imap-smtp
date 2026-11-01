@@ -39,9 +39,9 @@
       },
       "accounts": {
         "type": "object",
-        "description": "Mail accounts keyed by accountId. accountId must not contain a colon.",
+        "description": "Mail accounts keyed by accountId, which is the email address of the mailbox.",
         "propertyNames": {
-          "pattern": "^[^:]+$"
+          "pattern": "^[^:@\\s]+@[^:@\\s]+$"
         },
         "additionalProperties": {
           "type": "object",
