@@ -410,8 +410,48 @@ function withinBound(message: Record<string, unknown>, bound: Bound | undefined,
   return side === "before" ? value < limit : value > limit;
 }
 
+type SearchCriteria = { unseen?: boolean; before?: Bound; after?: Bound };
+
 // UIDs in the selected mailbox, sorted by date with SORT, or by UID without it. The caller filters the exact bounds.
-async function sortedUids(client: ImapFlow, criteria: { unseen?: boolean; before?: Bound; after?: Bound }, sortDirection: SortDirection): Promise<{ uids: number[]; sortKey: SortKey }> {
+// The commands go through an internal API of imapflow. When it fails, the public search is used, sorted by UID.
+async function sortedUids(client: ImapFlow, criteria: SearchCriteria, sortDirection: SortDirection): Promise<{ uids: number[]; sortKey: SortKey }> {
+  try {
+    return await sortedUidsByCommand(client, criteria, sortDirection);
+  } catch {
+    return { uids: sortByUid(await searchUidsByPublicApi(client, criteria), sortDirection), sortKey: "uid" };
+  }
+}
+
+function sortByUid(uids: number[], sortDirection: SortDirection): number[] {
+  return uids.sort((a, b) => (sortDirection === "descending" ? b - a : a - b));
+}
+
+// One public search per condition, intersected, because imapflow takes one OR per query.
+async function searchUidsByPublicApi(client: ImapFlow, criteria: SearchCriteria): Promise<number[]> {
+  const queries: Record<string, unknown>[] = [];
+  if (criteria.unseen === true) queries.push({ seen: false });
+  for (const side of ["before", "after"] as const) {
+    const bound = criteria[side];
+    if (bound === undefined) continue;
+    if ("uid" in bound) {
+      queries.push({ uid: side === "before" ? `1:${Math.max(bound.uid - 1, 1)}` : `${bound.uid + 1}:*` });
+      continue;
+    }
+    const date = new Date(`${new Date(bound.date.getTime() + (side === "before" ? 2 : -2) * DAY).toISOString().slice(0, 10)}T00:00:00Z`);
+    queries.push(side === "before" ? { or: [{ sentBefore: date }, { not: { header: { date: true } }, before: date }] } : { or: [{ sentSince: date }, { not: { header: { date: true } }, since: date }] });
+  }
+  if (queries.length === 0) queries.push({ all: true });
+  let uids: number[] | undefined;
+  for (const query of queries) {
+    const found = await client.search(query, { uid: true });
+    if (!Array.isArray(found)) throw new Error("The mail server refused the search.");
+    const previous = uids === undefined ? undefined : new Set(uids);
+    uids = previous === undefined ? found : found.filter((uid) => previous.has(uid));
+  }
+  return uids ?? [];
+}
+
+async function sortedUidsByCommand(client: ImapFlow, criteria: SearchCriteria, sortDirection: SortDirection): Promise<{ uids: number[]; sortKey: SortKey }> {
   const keys: ImapAttribute[] = [];
   if (criteria.unseen === true) keys.push({ type: "ATOM", value: "UNSEEN" });
   if (criteria.before !== undefined) keys.push(...boundKeys(criteria.before, "before"));
@@ -430,7 +470,7 @@ async function sortedUids(client: ImapFlow, criteria: { unseen?: boolean; before
   }
   // Sorting by date here would need the date of every matching message, so the arrival order is used.
   (await exec("UID SEARCH", keys, { untagged: { SEARCH: collect } })).next();
-  return { uids: uids.sort((a, b) => (sortDirection === "descending" ? b - a : a - b)), sortKey: "uid" };
+  return { uids: sortByUid(uids, sortDirection), sortKey: "uid" };
 }
 
 function summary(accountMailAddress: string, path: string, uidValidity: bigint, message: FetchMessageObject, preview: string | undefined): Record<string, unknown> {
