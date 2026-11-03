@@ -2,10 +2,6 @@
 
 OpenClaw plugin that lets an agent use its own mailbox. The agent checks new mail, reads messages and attachments, writes drafts, sends them, and files or deletes messages, working directly with the IMAP and SMTP servers of its account. The mailboxes, flags, and drafts stay on the mail server, so people and other mail clients share them with the agent.
 
-## Limitations
-
-- There is no tool to search messages.
-
 ## Tools
 
 Mailboxes are identified by `mailboxId` (`<accountMailAddress>:<path>`) and messages by `messageId` (`<accountMailAddress>:<UIDVALIDITY>:<UID>:<path>`). A message moved to another mailbox gets a new `messageId`. Dates are ISO 8601. Reading a message does not mark it as read.
@@ -14,11 +10,11 @@ The plugin finds the drafts, sent, and trash mailboxes by their special use, whi
 
 Messages in lists have `messageId`, `mailboxId`, `uid`, `subject`, `date` (sent), `receivedDate`, the addresses, `flags`, `keywords`, `internetMessageId`, `inReplyTo`, `references`, `imipMessage`, `size`, `previewText`, and `attachments`. `previewText` is made from the first bytes of the `text/plain` part, or of the `text/html` part of a message without `text/plain`; a character, an encoded unit, or an HTML tag cut at the end is left out.
 
-Lists of messages are sorted by `sortKey` in `sortDirection`, which the result has. `sortKey` is `date` (the Date header, or `receivedDate` without one) on a server with the SORT extension, or `uid` (the order the messages were added to the mailbox) on a server without it, or when the SORT command cannot be sent.
+Lists of messages from `imap_get_status` and `imap_list_messages` are sorted by `sortKey` in `sortDirection`, which the result has. `sortKey` is `date` (the Date header, or `receivedDate` without one) on a server with the SORT extension, or `uid` (the order the messages were added to the mailbox) on a server without it, or when the SORT command cannot be sent.
 
 ### `imap_get_status`
 
-Gets every account and mailbox with its message counts and up to `maxUnreadMessagesPerMailbox` unread messages, newest first.
+Gets every account with the capabilities of its IMAP server, and every mailbox with its message counts and up to `maxUnreadMessagesPerMailbox` unread messages, newest first.
 
 | Parameter | Value |
 | --- | --- |
@@ -37,6 +33,22 @@ Lists the messages of a mailbox.
 | `before`, `after` | Lists only messages before or after the bound: a `uid` (an integer), or a date and time with a time zone (a string) compared with `date`, or `receivedDate` without one. A message at exactly the bound is not included. |
 | `sortDirection` | `descending` (newest first) or `ascending` (oldest first). Defaults to `ascending` when only `after` is given, and to `descending` otherwise. |
 | `prereadPlainBytes`, `prereadHtmlBytes` | Bytes read to make `previewText`. Defaults to the plugin config. |
+
+### `imap_search_messages`
+
+Searches messages in mailboxes with `UID SEARCH`, or with `UID SORT` when `sortKeys` is given. The result has `results` with an entry for each mailbox: `mailboxId` and its `messages` in the order the server returned them, or `error` with the response of the server when it rejected the search. All parameters are optional.
+
+| Parameter | Value |
+| --- | --- |
+| `mailboxIds` | Mailboxes to search. Defaults to every mailbox of every account except the drafts and trash mailboxes. |
+| `predicate` | A string is searched with `TEXT`, in the header or the body; strings in an array all must be found. An object holds IMAP SEARCH keys that all must match: each property name is a search key with its arguments except the last, and the value is the last argument, a string or a number. `true` sends the key alone, `false` sends it with `NOT`, and an array sends the key once for each value, such as `{"SUBJECT": "invoice", "HEADER X-Mailer": "Foo", "SEEN": false, "SINCE": "1-Oct-2026"}`. |
+| `unread` | `true` searches only unread messages (`UNSEEN`), and `false` only read messages (`SEEN`). |
+| `flagged` | `true` searches only flagged messages (`FLAGGED`), and `false` only messages without the flag (`UNFLAGGED`). |
+| `sortKeys` | IMAP SORT criteria, such as `["REVERSE DATE", "SUBJECT"]`. Without `sortKeys`, the messages are not sorted. |
+| `limit` | Number of messages per mailbox, sent as `RETURN (PARTIAL 1:<limit>)` |
+| `prereadPlainBytes`, `prereadHtmlBytes` | Bytes read to make `previewText`. Defaults to the plugin config. |
+
+`CHARSET UTF-8` is sent when the search has non-ASCII text.
 
 ### `imap_get_message`
 

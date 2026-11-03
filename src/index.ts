@@ -367,8 +367,9 @@ async function summaries(client: ImapFlow, accountMailAddress: string, path: str
   });
 }
 
-type ImapAttribute = { type: "ATOM" | "STRING" | "SEQUENCE"; value: string } | ImapAttribute[];
-type ImapExec = (command: string, attributes: ImapAttribute[], options: { untagged: Record<string, (response: { numbers?: number[]; attributes?: { value?: unknown }[] }) => Promise<void>> }) => Promise<{ next(): void }>;
+type ImapAttribute = { type: "ATOM" | "STRING" | "SEQUENCE"; value: string } | { type: "LITERAL"; value: Buffer } | ImapAttribute[];
+type ImapResponseAttribute = { value?: unknown } | ImapResponseAttribute[];
+type ImapExec = (command: string, attributes: ImapAttribute[], options: { untagged: Record<string, (response: { numbers?: number[]; attributes?: ImapResponseAttribute[] }) => Promise<void>> }) => Promise<{ next(): void }>;
 
 function imapDate(date: Date): string {
   const [year, month, day] = date.toISOString().slice(0, 10).split("-");
@@ -458,8 +459,8 @@ async function sortedUidsByCommand(client: ImapFlow, criteria: SearchCriteria, s
   if (criteria.after !== undefined) keys.push(...boundKeys(criteria.after, "after"));
   if (keys.length === 0) keys.push({ type: "ATOM", value: "ALL" });
   const uids: number[] = [];
-  const collect = async (untagged: { numbers?: number[]; attributes?: { value?: unknown }[] }) => {
-    uids.push(...(untagged.numbers ?? (untagged.attributes ?? []).map((attribute) => Number(attribute.value))));
+  const collect = async (untagged: { numbers?: number[]; attributes?: ImapResponseAttribute[] }) => {
+    uids.push(...(untagged.numbers ?? (untagged.attributes ?? []).map((attribute) => Number((attribute as { value?: unknown }).value))));
   };
   // imapflow has no SORT command and does not take these search keys as they are, so they are sent through the connection's command queue.
   const exec = (client as unknown as { exec: ImapExec }).exec.bind(client);
@@ -471,6 +472,124 @@ async function sortedUidsByCommand(client: ImapFlow, criteria: SearchCriteria, s
   // Sorting by date here would need the date of every matching message, so the arrival order is used.
   (await exec("UID SEARCH", keys, { untagged: { SEARCH: collect } })).next();
   return { uids: sortByUid(uids, sortDirection), sortKey: "uid" };
+}
+
+// A search argument as imapflow sends it: a literal for non-ASCII text, a sequence set as it is,
+// and an atom otherwise, which is quoted when it has characters an atom cannot have.
+function searchArgument(value: string): ImapAttribute {
+  if (/[^\x00-\x7f]/u.test(value)) return { type: "LITERAL", value: Buffer.from(value) };
+  if (/^[\d*]+(?::[\d*]+)?(?:,[\d*]+(?::[\d*]+)?)*$/u.test(value)) return { type: "SEQUENCE", value };
+  return { type: "ATOM", value };
+}
+
+// Search keys of a predicate: a string or strings searched with TEXT, or an object of search keys
+// with their arguments except the last, valued with the last argument.
+function predicateKeys(predicate: unknown): ImapAttribute[] {
+  if (predicate === undefined) return [];
+  if (typeof predicate === "string" || Array.isArray(predicate)) return predicateKeys({ TEXT: predicate });
+  if (predicate === null || typeof predicate !== "object") throw new Error("predicate must be a string, an array of strings, or an object of search keys.");
+  return Object.entries(predicate).flatMap(([key, value]) =>
+    (Array.isArray(value) ? value : [value]).flatMap((entry: unknown) => {
+      const words = key.trim().split(/\s+/u).map(searchArgument);
+      if (entry === true) return words;
+      if (entry === false) return [{ type: "ATOM", value: "NOT" } as ImapAttribute, ...words];
+      if (typeof entry === "string" || typeof entry === "number") return [...words, searchArgument(String(entry))];
+      throw new Error(`${key} in predicate must be a string, a number, true, false, or an array of them.`);
+    }),
+  );
+}
+
+function sortCriteria(params: Params): ImapAttribute[] | undefined {
+  if (params.sortKeys === undefined) return undefined;
+  const value = params.sortKeys;
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) throw new Error("sortKeys must be an array of strings.");
+  return value.flatMap((entry: string) => entry.trim().split(/\s+/u).map((word): ImapAttribute => ({ type: "ATOM", value: word })));
+}
+
+// UIDs of the PARTIAL result of an ESEARCH response, in the order the server returned them.
+function partialUids(attributes: ImapResponseAttribute[]): number[] {
+  const index = attributes.findIndex((attribute) => !Array.isArray(attribute) && String(attribute.value).toUpperCase() === "PARTIAL");
+  const result = attributes[index + 1];
+  const set = Array.isArray(result) ? (result[1] as { value?: unknown } | undefined)?.value : undefined;
+  if (index < 0 || typeof set !== "string") return [];
+  return set.split(",").flatMap((range) => {
+    const [first, last = first] = range.split(":").map(Number) as [number, number?];
+    const step = first <= last ? 1 : -1;
+    return Array.from({ length: Math.abs(last - first) + 1 }, (_value, offset) => first + offset * step);
+  });
+}
+
+type Search = { keys: ImapAttribute[]; sortCriteria?: ImapAttribute[]; limit?: number };
+
+// UIDs in the selected mailbox in the order the server returns them. The command is sent through
+// an internal API of imapflow, which has no SORT command and does not take search keys as they are.
+async function searchUids(client: ImapFlow, search: Search): Promise<number[]> {
+  const utf8 = search.keys.some((key) => !Array.isArray(key) && key.type === "LITERAL");
+  const returnOptions: ImapAttribute[] = search.limit === undefined ? [] : [{ type: "ATOM", value: "RETURN" }, [{ type: "ATOM", value: "PARTIAL" }, { type: "ATOM", value: `1:${search.limit}` }]];
+  const keys: ImapAttribute[] = search.keys.length === 0 ? [{ type: "ATOM", value: "ALL" }] : search.keys;
+  const uids: number[] = [];
+  const collect = async (untagged: { numbers?: number[]; attributes?: ImapResponseAttribute[] }) => {
+    uids.push(...(untagged.numbers ?? (untagged.attributes ?? []).map((attribute) => Number((attribute as { value?: unknown }).value))));
+  };
+  const untagged = {
+    SEARCH: collect,
+    SORT: collect,
+    ESEARCH: async (response: { attributes?: ImapResponseAttribute[] }) => {
+      uids.push(...partialUids(response.attributes ?? []));
+    },
+  };
+  const exec = (client as unknown as { exec: ImapExec }).exec.bind(client);
+  if (search.sortCriteria === undefined) {
+    const charset: ImapAttribute[] = utf8 ? [{ type: "ATOM", value: "CHARSET" }, { type: "ATOM", value: "UTF-8" }] : [];
+    (await exec("UID SEARCH", [...returnOptions, ...charset, ...keys], { untagged })).next();
+  } else {
+    (await exec("UID SORT", [...returnOptions, search.sortCriteria, { type: "ATOM", value: utf8 ? "UTF-8" : "US-ASCII" }, ...keys], { untagged })).next();
+  }
+  return uids;
+}
+
+// The response of the mail server to a failed command, such as "BAD Invalid search key", or the error message.
+function serverResponse(error: unknown): string {
+  const { responseStatus, responseText } = error as { responseStatus?: string; responseText?: string };
+  return responseStatus === undefined ? errorMessage(error) : [responseStatus, responseText].filter(Boolean).join(" ");
+}
+
+async function searchMessages(accounts: Map<string, AccountConfig>, mailboxIds: string[] | undefined, search: Search, preread: PrereadBytes) {
+  const targets = new Map<string, string[] | undefined>();
+  if (mailboxIds === undefined) {
+    for (const accountMailAddress of accounts.keys()) targets.set(accountMailAddress, undefined);
+  } else {
+    for (const id of mailboxIds) {
+      const { accountMailAddress, path } = parseMailboxId(id);
+      targets.set(accountMailAddress, [...(targets.get(accountMailAddress) ?? []), path]);
+    }
+  }
+  const results = await Promise.all([...targets].map(async ([accountMailAddress, requestedPaths]): Promise<Record<string, unknown>[]> => {
+    try {
+      return await withImap(account(accounts, accountMailAddress), async (client) => {
+        const paths = requestedPaths ?? (await client.list()).filter((entry) => entry.specialUse !== "\\Drafts" && entry.specialUse !== "\\Trash").map((entry) => entry.path);
+        const output: Record<string, unknown>[] = [];
+        for (const path of paths) {
+          const item = { mailboxId: mailboxId(accountMailAddress, path) };
+          try {
+            const { lock, uidValidity } = await openMailbox(client, { path });
+            try {
+              output.push({ ...item, messages: await summaries(client, accountMailAddress, path, uidValidity, await searchUids(client, search), preread) });
+            } finally {
+              lock.release();
+            }
+          } catch (error) {
+            output.push({ ...item, error: serverResponse(error) });
+          }
+        }
+        return output;
+      });
+    } catch (error) {
+      return requestedPaths === undefined ? [{ accountMailAddress, error: errorMessage(error) }] : requestedPaths.map((path) => ({ mailboxId: mailboxId(accountMailAddress, path), error: errorMessage(error) }));
+    }
+  }));
+  const flat = results.flat();
+  return { results: mailboxIds === undefined ? flat : mailboxIds.map((id) => flat.find((entry) => entry.mailboxId === id)) };
 }
 
 function summary(accountMailAddress: string, path: string, uidValidity: bigint, message: FetchMessageObject, preview: string | undefined): Record<string, unknown> {
@@ -537,7 +656,9 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number, pr
       try {
         return {
           ...base,
-          mailboxes: await withImap(config, async (client) => {
+          ...(await withImap(config, async (client) => {
+            // imapflow keeps APPENDLIMIT=n as APPENDLIMIT with the number.
+            const capabilities = [...client.capabilities].map(([name, value]) => (value === true ? name : `${name}=${value}`));
             const mailboxes = await client.list({ statusQuery: { messages: true, unseen: true } });
             const output: Record<string, unknown>[] = [];
             for (const entry of mailboxes) {
@@ -564,8 +685,8 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number, pr
               }
               output.push(item);
             }
-            return output;
-          }),
+            return { capabilities, mailboxes: output };
+          })),
         };
       } catch (error) {
         return { ...base, error: errorMessage(error) };
@@ -742,7 +863,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "imap_get_status",
       label: "Get IMAP Mail Status",
-      description: `Get the mail status from the IMAP servers: every account (accountMailAddress, identities) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first (sortDirection descending) and at most maxUnreadMessagesPerMailbox per mailbox. ${SORT_KEY_DESCRIPTION} The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
+      description: `Get the mail status from the IMAP servers: every account (accountMailAddress, identities, and capabilities, the CAPABILITY of its IMAP server after login) and mailbox (mailboxId, name, specialRole, total and unread message counts) with its unreadMessages, newest first (sortDirection descending) and at most maxUnreadMessagesPerMailbox per mailbox. ${SORT_KEY_DESCRIPTION} The status is read directly from the servers, so no synchronization is needed. ${SUMMARY_DESCRIPTION} A mailbox without unread messages has no unreadMessages. When an account or a mailbox cannot be read, error holds the reason.`,
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -795,6 +916,50 @@ export default definePluginEntry({
             lock.release();
           }
         }));
+      },
+    });
+
+    api.registerTool({
+      name: "imap_search_messages",
+      label: "Search IMAP Messages",
+      description: `Search messages in mailboxes with IMAP SEARCH, or with IMAP SORT when sortKeys is given. results has an entry for each mailbox: mailboxId and its messages in the order the server returned them, or error with the response of the server when it rejected the search. imap_get_status returns the capabilities of each server. ${SUMMARY_DESCRIPTION}`,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          mailboxIds: { type: "array", items: { type: "string" }, description: "Mailboxes to search. Defaults to every mailbox of every account except the drafts and trash mailboxes." },
+          predicate: {
+            anyOf: [
+              { type: "string" },
+              { type: "array", items: { type: "string" } },
+              { type: "object", additionalProperties: { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }, { type: "array", items: { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] } }] } },
+            ],
+            description:
+              'A string is searched with TEXT, in the header or the body; strings in an array all must be found. An object holds IMAP SEARCH keys (RFC 9051) that all must match: each property name is a search key with its arguments except the last, and the value is the last argument, a string or a number. true sends the key alone, false sends it with NOT, and an array sends the key once for each value. Example: {"SUBJECT": "invoice", "HEADER X-Mailer": "Foo", "SEEN": false, "SINCE": "1-Oct-2026"}. Search keys: ALL, ANSWERED, BCC <string>, BEFORE <date>, BODY <string>, CC <string>, DELETED, DRAFT, FLAGGED, FROM <string>, HEADER <field-name> <string>, KEYWORD <flag>, LARGER <n>, NOT <search-key>, ON <date>, OR <search-key1> <search-key2>, SEEN, SENTBEFORE <date>, SENTON <date>, SENTSINCE <date>, SINCE <date>, SMALLER <n>, SUBJECT <string>, TEXT <string>, TO <string>, UID <sequence set>, UNANSWERED, UNDELETED, UNDRAFT, UNFLAGGED, UNKEYWORD <flag>, UNSEEN. CHARSET UTF-8 is sent when the search has non-ASCII text.',
+          },
+          unread: { type: "boolean", description: "true searches only unread messages (UNSEEN), and false only read messages (SEEN)." },
+          flagged: { type: "boolean", description: "true searches only flagged (starred) messages (FLAGGED), and false only messages without the flag (UNFLAGGED)." },
+          sortKeys: {
+            type: "array",
+            items: { type: "string" },
+            description: 'IMAP SORT criteria (RFC 5256), such as ["REVERSE DATE", "SUBJECT"]. Sort keys: ARRIVAL, CC, DATE, FROM, SIZE, SUBJECT, TO, each optionally preceded by REVERSE. Sent as UID SORT when given; without sortKeys, UID SEARCH is sent and the messages are not sorted.',
+          },
+          limit: { type: "integer", minimum: 1, description: "Number of messages per mailbox, sent as RETURN (PARTIAL 1:<limit>)." },
+          ...prereadBytesSchema,
+        },
+      },
+      async execute(_id: string, params: Params) {
+        const keys: ImapAttribute[] = [];
+        for (const [name, set, clear] of [["unread", "UNSEEN", "SEEN"], ["flagged", "FLAGGED", "UNFLAGGED"]] as const) {
+          if (params[name] === undefined) continue;
+          if (typeof params[name] !== "boolean") throw new Error(`${name} must be true or false.`);
+          keys.push({ type: "ATOM", value: params[name] ? set : clear });
+        }
+        keys.push(...predicateKeys(params.predicate));
+        const limit = params.limit;
+        if (limit !== undefined && (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1)) throw new Error("limit must be a positive integer.");
+        const mailboxIds = params.mailboxIds === undefined ? undefined : stringArray(params, "mailboxIds");
+        return result(await searchMessages(readAccounts(api), mailboxIds, { keys, sortCriteria: sortCriteria(params), limit: limit as number | undefined }, prereadBytes(api, params)));
       },
     });
 
