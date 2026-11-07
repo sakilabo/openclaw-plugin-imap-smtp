@@ -6,6 +6,7 @@
     "tools": [
       "imap_get_status",
       "imap_list_messages",
+      "imap_search_messages",
       "imap_get_message",
       "imap_get_messages",
       "imap_get_attachment_text",
