@@ -1,4 +1,4 @@
-import { ImapFlow, type FetchMessageObject, type MessageAddressObject, type MessageStructureObject } from "imapflow";
+import { ImapFlow, type FetchMessageObject, type ListOptions, type ListResponse, type MessageAddressObject, type MessageStructureObject } from "imapflow";
 import { simpleParser } from "mailparser";
 import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer";
@@ -54,6 +54,8 @@ const MAX_MESSAGES_PER_MAILBOX = 100;
 const ACCOUNT_MAIL_ADDRESS_PATTERN = /^[^:@\s]+@[^:@\s]+$/u;
 const DEFAULT_PREREAD_PLAIN_BYTES = 1024;
 const DEFAULT_PREREAD_HTML_BYTES = 2048;
+// Courier-IMAP lists the files .mailfilter and .alias of the Maildir as mailboxes of these names, which cannot be selected.
+const MAILDIR_FILE_NAMES = new Set(["mailfilter", "alias"]);
 
 type PrereadBytes = { plain: number; html: number };
 
@@ -567,7 +569,7 @@ async function searchMessages(accounts: Map<string, AccountConfig>, mailboxIds: 
   const results = await Promise.all([...targets].map(async ([accountMailAddress, requestedPaths]): Promise<Record<string, unknown>[]> => {
     try {
       return await withImap(account(accounts, accountMailAddress), async (client) => {
-        const paths = requestedPaths ?? (await client.list()).filter((entry) => entry.specialUse !== "\\Drafts" && entry.specialUse !== "\\Trash").map((entry) => entry.path);
+        const paths = requestedPaths ?? (await listMailboxes(client)).filter((entry) => entry.specialUse !== "\\Drafts" && entry.specialUse !== "\\Trash").map((entry) => entry.path);
         const output: Record<string, unknown>[] = [];
         for (const path of paths) {
           const item = { mailboxId: mailboxId(accountMailAddress, path) };
@@ -631,6 +633,22 @@ async function openMailbox(client: ImapFlow, ref: { path: string; uidValidity?: 
   return { lock, uidValidity: mailbox.uidValidity };
 }
 
+// The mailboxes of the account, leaving out the mailboxes named in MAILDIR_FILE_NAMES that cannot be selected.
+async function listMailboxes(client: ImapFlow, options?: ListOptions): Promise<ListResponse[]> {
+  const mailboxes: ListResponse[] = [];
+  for (const entry of await client.list(options)) {
+    if (MAILDIR_FILE_NAMES.has(entry.name)) {
+      try {
+        (await openMailbox(client, { path: entry.path })).lock.release();
+      } catch {
+        continue;
+      }
+    }
+    mailboxes.push(entry);
+  }
+  return mailboxes;
+}
+
 async function specialMailbox(client: ImapFlow, use: SpecialUse): Promise<string> {
   const mailbox = (await client.list()).find((entry) => entry.specialUse === use);
   if (mailbox === undefined) throw new Error(`The account has no ${use} mailbox.`);
@@ -659,7 +677,7 @@ async function getStatus(accounts: Map<string, AccountConfig>, limit: number, pr
           ...(await withImap(config, async (client) => {
             // imapflow keeps APPENDLIMIT=n as APPENDLIMIT with the number.
             const capabilities = [...client.capabilities].map(([name, value]) => (value === true ? name : `${name}=${value}`));
-            const mailboxes = await client.list({ statusQuery: { messages: true, unseen: true } });
+            const mailboxes = await listMailboxes(client, { statusQuery: { messages: true, unseen: true } });
             const output: Record<string, unknown>[] = [];
             for (const entry of mailboxes) {
               const item: Record<string, unknown> = { mailboxId: mailboxId(accountMailAddress, entry.path), name: entry.path, specialRole: entry.specialUse?.replace(/^\\/u, "").toLowerCase() };
