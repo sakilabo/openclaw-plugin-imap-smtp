@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 — 2026-11-08
+
+### Changed
+
+- Leave the mailboxes named `mailfilter` and `alias`, which Courier-IMAP lists for the files `.mailfilter` and `.alias` of the Maildir, out of the mailboxes of `imap_get_status` and `imap_search_messages` when they cannot be selected.
+
+### Fixed
+
+- Declare `imap_search_messages` in `contracts.tools` of `openclaw.plugin.json`, without which OpenClaw did not register the tool.
+
 ## 0.2.0 — 2026-11-03
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-imap-smtp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "OpenClaw tools that read and send mail directly through IMAP and SMTP.",
